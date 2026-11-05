@@ -1,5 +1,5 @@
-// Offline cache for the app shell (network first, so updates on GitHub show up right away).
-const CACHE = "lulusia-studio-v1";
+﻿// Offline cache for the app shell (network first, so updates on GitHub show up right away).
+const CACHE = "lulusia-studio-v2";
 const FILES = ["./", "index.html", "manifest.webmanifest", "assets/glyphs.json", "assets/logo.png",
                "assets/Inter-Black.otf", "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png"];
 self.addEventListener("install", e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))));

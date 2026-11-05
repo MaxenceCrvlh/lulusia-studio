@@ -61,12 +61,12 @@
 <section class="card">
   <label class="btn red big" style="text-align:center">📷 Take / choose a photo
     <input type="file" id="photo" accept="image/*" capture="environment" class="hidden"></label>
-  <p class="hint">Card flat on a plain surface that contrasts with its border, soft even light, no reflections, phone
-     straight above. You can fix the 4 corners after.</p>
+  <p class="hint">Card flat on a plain dark surface, soft even light, no reflections, phone straight above.</p>
+  <p id="status" class="hint"></p>
 </section>
 
 <section class="card hidden" id="adjust">
-  <b>Card corners</b> <span class="hint">— drag the dots onto the card's corners</span>
+  <b>Card corners</b> <span class="hint" id="adjustHint">— drag the dots onto the card's corners</span>
   <div id="stage"><canvas id="src"></canvas></div>
   <div class="row" style="margin-top:10px">
     <button id="btnRender" class="red">Make the post image</button>
@@ -76,7 +76,8 @@
 
 <section class="card hidden" id="result">
   <img id="out" alt="post preview">
-  <div class="row" style="margin-top:10px"><button class="ghost" id="btnSave">Save image</button></div>
+  <div class="row" style="margin-top:10px"><button class="ghost" id="btnSave">Save image</button>
+    <button class="ghost" id="btnFix">Fix corners</button><button class="ghost" id="btnRot2">↻ 180°</button></div>
   <label>Card name (English)</label><input id="fName" placeholder="Yamato">
   <label>Card ID</label><input id="fId" placeholder="P-008" autocapitalize="characters">
   <label>Rarity / type</label><input id="fKind" placeholder="P Promo · L Alt Art · SEC Manga …">
@@ -92,7 +93,7 @@
 // ---------------- constants (same look as studio/studio.py) ----------------
 const OUT_W = 1440, OUT_H = 1728;                       // Instagram 4:5 max size
 const CARD_MM = [63, 88], CORNER_MM = 3, INSET_MM = .15;
-const LAYOUT = { heightFrac: .952, top: .032 };
+const LAYOUT = { heightFrac: .952, top: .024 };            // card perfectly centred (same margin top and bottom)
 const SHADOW = { dx: -.0105, dy: .0075, blur: .0055, opacity: .36 };
 const BG = 250, GLYPH_INK = .055, SHARPEN = .6;
 const GRAPH = "https://graph.facebook.com/v24.0";
@@ -124,16 +125,22 @@ $("btnTestKeys").onclick = async () => { const k = keys(); $("keyStatus").textCo
 $("photo").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   const img = await loadImage(URL.createObjectURL(f));
-  useImage(img);
+  e.target.value = "";                                     // same photo can be picked again
+  await useImage(img);
 };
 function loadImage(url) { return new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = url; }); }
-function useImage(img) {
+async function useImage(img) {
+  $("status").textContent = "Finding the card…"; $("adjust").classList.add("hidden"); $("result").classList.add("hidden");
+  await new Promise(r => setTimeout(r, 30));
   const s = Math.min(1, MAX_SRC / Math.max(img.naturalWidth, img.naturalHeight));
   srcCanvas = document.createElement("canvas");
   srcCanvas.width = Math.round(img.naturalWidth * s); srcCanvas.height = Math.round(img.naturalHeight * s);
   const c = srcCanvas.getContext("2d"); c.imageSmoothingQuality = "high"; c.drawImage(img, 0, 0, srcCanvas.width, srcCanvas.height);
-  corners = detectCard(srcCanvas) || defaultCorners(srcCanvas);
-  showAdjust();
+  flip180 = false;
+  const found = detectCard(srcCanvas);
+  corners = found || defaultCorners(srcCanvas);
+  if (found) { $("status").textContent = "Card found ✓"; await render(); }
+  else { $("status").textContent = ""; showAdjust("Card not found — drag the 4 dots onto its corners."); }
 }
 function defaultCorners(cv) { const w = cv.width, h = cv.height; return [[w*.2,h*.15],[w*.8,h*.15],[w*.8,h*.85],[w*.2,h*.85]]; }
 
@@ -151,21 +158,41 @@ function detectCard(cv) {
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < B || y < B || x >= w - B || y >= h - B) { const i = y*w + x; bl.push(lab[3*i]); ba.push(lab[3*i+1]); bb.push(lab[3*i+2]); }
   const med = a => { a.sort((p, q) => p - q); return a[a.length >> 1]; };
   const bg = [med(bl), med(ba), med(bb)];
-  const dist = new Float32Array(w * h);
-  for (let i = 0; i < w * h; i++) dist[i] = Math.hypot(lab[3*i]-bg[0], lab[3*i+1]-bg[1], lab[3*i+2]-bg[2]);
-  const thr = otsu(dist);
-  let mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = dist[i] > thr ? 1 : 0;
-  mask = close(mask, w, h, 4);
-  const blob = largestBlob(mask, w, h); if (!blob || blob.count < w * h * .04) return null;
-  // 4 extreme points of the blob (card is a convex quad): extremes of x+y, x-y
-  let p = [null, null, null, null], v = [-1e9, -1e9, -1e9, -1e9];
-  for (const i of blob.pixels) { const x = i % w, y = (i / w) | 0;
-    const s = [-(x + y), x - y, x + y, y - x];
-    for (let k = 0; k < 4; k++) if (s[k] > v[k]) { v[k] = s[k]; p[k] = [x, y]; } }
-  let c = p.map(q => [q[0] / sc, q[1] / sc]);                          // TL, TR, BR, BL
-  try { c = refineCorners(cv, c); } catch (e) { console.warn(e); }
+  // several ways to split card / background (colour distance, brightness only, looser / stricter);
+  // keep the blob that looks most like a card: fills its 4-corner quad and has the 63:88 shape
+  const dist = new Float32Array(w * h), dL = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) { dist[i] = Math.hypot(lab[3*i]-bg[0], lab[3*i+1]-bg[1], lab[3*i+2]-bg[2]); dL[i] = Math.abs(lab[3*i] - bg[0]); }
+  const tD = otsu(dist), tL = otsu(dL);
+  let best = null;
+  for (const [a, t] of [[dist, tD], [dL, tL], [dist, tD * .6], [dist, tD * 1.4], [dL, tL * .6]]) {
+    let mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = a[i] > t ? 1 : 0;
+    mask = close(mask, w, h, 4);
+    const blob = largestBlob(mask, w, h); if (!blob || blob.count < w * h * .03) continue;
+    const q = quadOf(blob.pixels, w), score = cardScore(q, blob.count);
+    if (!best || score > best.score) best = { q, score };
+  }
+  if (!best || best.score < .7) return null;
+  let c = best.q.map(p => [p[0] / sc, p[1] / sc]);                      // TL, TR, BR, BL
+  try { const r = refineCorners(cv, c), tol = .03 * Math.max(cv.width, cv.height);   // refined edges, unless they jumped away
+        if (r.every((p, k) => Math.hypot(p[0] - c[k][0], p[1] - c[k][1]) < tol)) c = r; } catch (e) { console.warn(e); }
   return c;
 }
+function quadOf(pixels, w) { // 4 extreme points of the blob: extremes of x+y, x-y (TL, TR, BR, BL)
+  let p = [null, null, null, null], v = [-1e9, -1e9, -1e9, -1e9];
+  for (const i of pixels) { const x = i % w, y = (i / w) | 0, s = [-(x + y), x - y, x + y, y - x];
+    for (let k = 0; k < 4; k++) if (s[k] > v[k]) { v[k] = s[k]; p[k] = [x, y]; } }
+  return p; }
+function cardScore(q, count) { // 1 = perfect card: blob fills the quad, sides in the 63:88 ratio, 4 near-right angles
+  let area = 0; for (let k = 0; k < 4; k++) { const a = q[k], b = q[(k + 1) % 4]; area += a[0] * b[1] - b[0] * a[1]; } area = Math.abs(area) / 2;
+  if (area < 1) return 0;
+  const fill = Math.min(count / area, area / count);
+  const side = k => Math.hypot(q[(k + 1) % 4][0] - q[k][0], q[(k + 1) % 4][1] - q[k][1]);
+  const s1 = (side(0) + side(2)) / 2, s2 = (side(1) + side(3)) / 2, ratio = Math.max(s1, s2) / Math.min(s1, s2);
+  const shape = Math.max(0, 1 - Math.abs(ratio / (CARD_MM[1] / CARD_MM[0]) - 1) * 2.5);            // perspective: ±20 % ok-ish
+  let ang = 1; for (let k = 0; k < 4; k++) { const a = q[(k + 3) % 4], b = q[k], c = q[(k + 1) % 4];
+    const u = [a[0] - b[0], a[1] - b[1]], v = [c[0] - b[0], c[1] - b[1]];
+    const cos = Math.abs(u[0] * v[0] + u[1] * v[1]) / (Math.hypot(...u) * Math.hypot(...v) + 1e-9); ang = Math.min(ang, 1 - cos); }
+  return fill * (.5 + .5 * shape) * (.5 + .5 * ang); }
 function rgb2lab(r, g, b) { // sRGB -> CIE Lab (D65)
   const f = u => { u /= 255; return u > .04045 ? Math.pow((u + .055) / 1.055, 2.4) : u / 12.92; };
   r = f(r); g = f(g); b = f(b);
@@ -237,7 +264,8 @@ function intersect(l1, l2) { const [x1, y1] = l1.p, [dx1, dy1] = l1.d, [x2, y2] 
   const den = dx1 * dy2 - dy1 * dx2; const t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / den; return [x1 + t * dx1, y1 + t * dy1]; }
 
 // ---------------- corner adjustment UI ----------------
-function showAdjust() {
+function showAdjust(msg) {
+  $("adjustHint").textContent = msg || "— drag the dots onto the card's corners";
   $("adjust").classList.remove("hidden"); $("result").classList.add("hidden");
   const cv = $("src"); const s = Math.min(1, 1400 / Math.max(srcCanvas.width, srcCanvas.height));
   cv.width = Math.round(srcCanvas.width * s); cv.height = Math.round(srcCanvas.height * s); cv.dataset.s = s;
@@ -260,20 +288,24 @@ function drag(h) { h.addEventListener("pointerdown", e => { h.setPointerCapture(
   h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); }); }
 window.addEventListener("resize", () => srcCanvas && placeHandles());
 let flip180 = false;
-$("btnRot").onclick = () => { flip180 = !flip180; if (!$("result").classList.contains("hidden")) $("btnRender").click(); };
+$("btnRot").onclick = $("btnRot2").onclick = () => { flip180 = !flip180; if (!$("result").classList.contains("hidden")) render(); };
+$("btnFix").onclick = () => showAdjust();
 
 // ---------------- render the post image ----------------
-$("btnRender").onclick = async () => {
+$("btnRender").onclick = () => render();
+async function render() {
   $("btnRender").disabled = true; $("btnRender").textContent = "Working…";
+  $("status").textContent = ($("status").textContent + " Making the post…").trim();
   await new Promise(r => setTimeout(r, 30));
   try {
     const card = warpCard(srcCanvas, orderPortrait(corners));
     const blob = await compose(card);
     finalBlob = blob; $("out").src = URL.createObjectURL(blob);
-    $("result").classList.remove("hidden"); updateCaption(); $("result").scrollIntoView({ behavior: "smooth" });
+    $("adjust").classList.add("hidden"); $("result").classList.remove("hidden"); updateCaption(); $("result").scrollIntoView({ behavior: "smooth" });
   } catch (e) { alert("Render failed: " + e.message); console.error(e); }
+  $("status").textContent = "";
   $("btnRender").disabled = false; $("btnRender").textContent = "Make the post image";
-};
+}
 function orderPortrait(c) { // corners TL,TR,BR,BL so that TL->BL is the long side (card upright)
   const d = (a, b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
   let q = c.slice(); if (d(q[0], q[1]) > d(q[1], q[2])) q = [q[3], q[0], q[1], q[2]];   // landscape -> rotate
@@ -421,9 +453,10 @@ $("btnPost").onclick = async () => {
 showKeys();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 const demo = new URLSearchParams(location.search).get("demo");      // test hook: ?demo=<image url> -> auto render
-if (demo) loadImage(demo).then(img => { useImage(img); window.__corners = corners.map(p => p.map(Math.round)); return $("btnRender").onclick(); })
-  .then(() => { document.body.innerHTML = `<pre id="c">${JSON.stringify(window.__corners)}</pre><img src="${$("out") ? $("out").src : ""}" style="width:720px">`;
-                const o = document.querySelector("img"); o.src = URL.createObjectURL(finalBlob); document.title = "DEMO DONE"; });
+if (demo) loadImage(demo).then(async img => { const t0 = performance.now(); await useImage(img); window.__corners = corners.map(p => p.map(Math.round)); window.__ms = Math.round(performance.now() - t0);
+    window.__found = !$("result").classList.contains("hidden"); })
+  .then(() => { document.body.innerHTML = `<pre id="c">${JSON.stringify(window.__corners)} found=${window.__found} ${window.__ms}ms</pre><img style="width:720px">`;
+                const o = document.querySelector("img"); if (finalBlob) o.src = URL.createObjectURL(finalBlob); document.title = "DEMO DONE"; });
 </script>
 </body>
 </html>
