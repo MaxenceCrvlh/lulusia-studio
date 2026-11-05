@@ -61,7 +61,8 @@
 <section class="card">
   <label class="btn red big" style="text-align:center">📷 Take / choose a photo
     <input type="file" id="photo" accept="image/*" capture="environment" class="hidden"></label>
-  <p class="hint">Card flat on a plain dark surface, soft even light, no reflections, phone straight above.</p>
+  <p class="hint">Card flat on a plain surface, soft even light, no reflections, phone straight above.
+     Black-bordered cards: use a grey or coloured mat (black on black is invisible).</p>
   <p id="status" class="hint"></p>
 </section>
 
@@ -102,6 +103,8 @@ const TAGS = "#onepiece #onepiececardgame #onepiecetcg #onepieceanime #onepiecem
   "#ワンピースマンガ {jp}#トレカ #トレーディングカードゲーム #コレクター #カード収集 #アニメ #マンガ #オタク #アニメ好き " +
   "#マンガ好き #アニメコレクション #マンガコレクション";
 const MAX_SRC = 4000;                                   // iOS canvases die above ~16 MP: work at <= 4000 px
+const ORT_URL = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js";
+const AI_MODEL = "assets/u2netp.onnx";                  // U^2-Net small (Apache-2.0, the rembg model), 4.4 MB
 
 const $ = id => document.getElementById(id);
 const log = m => { $("log").textContent += m + "\n"; };
@@ -137,15 +140,36 @@ async function useImage(img) {
   srcCanvas.width = Math.round(img.naturalWidth * s); srcCanvas.height = Math.round(img.naturalHeight * s);
   const c = srcCanvas.getContext("2d"); c.imageSmoothingQuality = "high"; c.drawImage(img, 0, 0, srcCanvas.width, srcCanvas.height);
   flip180 = false;
-  const found = detectCard(srcCanvas);
+  const found = await detectCard(srcCanvas);
   corners = found || defaultCorners(srcCanvas);
   if (found) { $("status").textContent = "Card found ✓"; await render(); }
   else { $("status").textContent = ""; showAdjust("Card not found — drag the 4 dots onto its corners."); }
 }
 function defaultCorners(cv) { const w = cv.width, h = cv.height; return [[w*.2,h*.15],[w*.8,h*.15],[w*.8,h*.85],[w*.2,h*.85]]; }
 
-// ---------------- card detection: background colour distance -> largest blob -> 4 corners -> edge refine ----------------
-function detectCard(cv) {
+// ---------------- card detection: AI silhouette (or colour distance) -> largest blob -> 4 corners -> edge refine ----------------
+let aiSession = null;
+function loadScript(src) { return new Promise((ok, ko) => { const s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = ko; document.head.appendChild(s); }); }
+async function aiMask(cv, w, h) { // u2netp at 320 px -> card silhouette 0..255 on the w x h detection grid (null if the AI can't run)
+  try {
+    if (!window.ort) await loadScript(ORT_URL);
+    if (!aiSession) { ort.env.wasm.numThreads = 1; aiSession = await ort.InferenceSession.create(AI_MODEL, { executionProviders: ["wasm"] }); }
+    const S = 320, t = document.createElement("canvas"); t.width = t.height = S;
+    const tc = t.getContext("2d"); tc.drawImage(cv, 0, 0, S, S); const d = tc.getImageData(0, 0, S, S).data;
+    let mx = 1; for (let i = 0; i < S * S; i++) mx = Math.max(mx, d[4*i], d[4*i+1], d[4*i+2]);
+    const mean = [.485, .456, .406], std = [.229, .224, .225], x = new Float32Array(3 * S * S);      // same input as rembg
+    for (let i = 0; i < S * S; i++) for (let k = 0; k < 3; k++) x[k * S * S + i] = (d[4*i+k] / mx - mean[k]) / std[k];
+    const r = await aiSession.run({ [aiSession.inputNames[0]]: new ort.Tensor("float32", x, [1, 3, S, S]) });
+    const v = r[aiSession.outputNames[0]].data; let lo = 1e9, hi = -1e9; for (const a of v) { if (a < lo) lo = a; if (a > hi) hi = a; }
+    const md = tc.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) { const p = 255 * (v[i] - lo) / (hi - lo + 1e-9); md.data[4*i] = md.data[4*i+1] = md.data[4*i+2] = p; md.data[4*i+3] = 255; }
+    tc.putImageData(md, 0, 0);
+    const m = document.createElement("canvas"); m.width = w; m.height = h;
+    const mc = m.getContext("2d"); mc.imageSmoothingQuality = "high"; mc.drawImage(t, 0, 0, w, h);
+    return m;
+  } catch (e) { console.warn("AI cut-out unavailable", e); return null; }
+}
+async function detectCard(cv) {
   const sc = Math.min(1, 700 / Math.max(cv.width, cv.height));
   const w = Math.round(cv.width * sc), h = Math.round(cv.height * sc);
   const t = document.createElement("canvas"); t.width = w; t.height = h;
@@ -163,6 +187,24 @@ function detectCard(cv) {
   const dist = new Float32Array(w * h), dL = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) { dist[i] = Math.hypot(lab[3*i]-bg[0], lab[3*i+1]-bg[1], lab[3*i+2]-bg[2]); dL[i] = Math.abs(lab[3*i] - bg[0]); }
   const tD = otsu(dist), tL = otsu(dL);
+  // 1) AI silhouette first: sees the card even when its dark edge melts into a dark mat
+  const ai = await aiMask(cv, w, h);
+  if (ai) {
+    const md = ai.getContext("2d").getImageData(0, 0, w, h).data;
+    let mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = md[4*i] > 127 ? 1 : 0;
+    const blob = largestBlob(mask, w, h);
+    if (blob && blob.count > w * h * .03) {
+      let q = quadOf(blob.pixels, w);
+      if (cardScore(q, blob.count) > .7) {
+        try { q = refineCorners(ai, q); } catch (e) { console.warn(e); }                  // straight sides fitted on the silhouette
+        let c = q.map(p => [p[0] / sc, p[1] / sc]);
+        try { const r = refineCorners(cv, c, .012), tol = .012 * Math.max(cv.width, cv.height);   // then the real edge, close by only
+              if (r.every((p, k) => Math.hypot(p[0] - c[k][0], p[1] - c[k][1]) < tol)) c = r; } catch (e) { console.warn(e); }
+        return c;
+      }
+    }
+  }
+  // 2) no AI: colour / brightness distance from the border colour
   let best = null;
   for (const [a, t] of [[dist, tD], [dL, tL], [dist, tD * .6], [dist, tD * 1.4], [dL, tL * .6]]) {
     let mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = a[i] > t ? 1 : 0;
@@ -226,7 +268,7 @@ function largestBlob(m, w, h) { const lab = new Int32Array(w * h); let best = nu
   return best; }
 
 // sub-pixel edges: along each side, many scanlines across the edge, strongest colour step, robust line fit
-function refineCorners(cv, c) {
+function refineCorners(cv, c, bandFrac = .04) {
   const W = cv.width, H = cv.height, ctx = cv.getContext("2d");
   const data = ctx.getImageData(0, 0, W, H).data;
   const lum = (x, y) => { x = Math.max(0, Math.min(W - 1, Math.round(x))); y = Math.max(0, Math.min(H - 1, Math.round(y))); const i = 4 * (y * W + x); return .299*data[i] + .587*data[i+1] + .114*data[i+2]; };
@@ -236,7 +278,7 @@ function refineCorners(cv, c) {
     const a = c[s], b = c[(s + 1) % 4]; const L = Math.hypot(b[0]-a[0], b[1]-a[1]);
     const ux = (b[0]-a[0]) / L, uy = (b[1]-a[1]) / L; let nx = -uy, ny = ux;
     const mid = [(a[0]+b[0]) / 2, (a[1]+b[1]) / 2]; if ((centre[0]-mid[0])*nx + (centre[1]-mid[1])*ny > 0) { nx = -nx; ny = -ny; } // normal points outward
-    const band = Math.max(8, L * .04), pts = [];
+    const band = Math.max(6, L * bandFrac), pts = [];
     for (let t = .12; t <= .88; t += .01) {                               // skip the rounded corners
       const px = a[0] + (b[0]-a[0]) * t, py = a[1] + (b[1]-a[1]) * t; let bestG = 0, bestO = 0, prev = lum(px - nx*band, py - ny*band);
       for (let o = -band + 1; o <= band; o++) { const v = lum(px + nx*o, py + ny*o), g = Math.abs(v - prev); if (g > bestG) { bestG = g; bestO = o - .5; } prev = v; }
