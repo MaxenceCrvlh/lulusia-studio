@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Lulusia Studio">
+<meta name="theme-color" content="#9E1B32">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<title>Lulusia Studio</title>
+<style>
+  @font-face { font-family: InterBlack; src: url(assets/Inter-Black.otf); }
+  :root { --carmine:#9E1B32; --card:#B3203A; --ink:#26252B; --bone:#F3ECE0; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bone); color:var(--ink); font:16px/1.4 -apple-system, system-ui, sans-serif;
+         padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom)); }
+  header { display:flex; align-items:center; gap:10px; padding:14px 0 10px; }
+  header img { width:34px; height:34px; border-radius:8px; }
+  header h1 { font:900 20px InterBlack, system-ui; margin:0; letter-spacing:.5px; }
+  header button { margin-left:auto; }
+  .card { background:#fff; border-radius:16px; padding:14px; margin:12px 0; box-shadow:0 1px 0 #0001; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  button, .btn { font:700 16px system-ui; border:0; border-radius:12px; padding:13px 16px; background:var(--ink); color:#fff; cursor:pointer; }
+  button.red { background:var(--carmine); } button.ghost { background:#0000; color:var(--ink); border:2px solid var(--ink); }
+  button:disabled { opacity:.4; }
+  .big { width:100%; font-size:18px; padding:16px; }
+  #stage { position:relative; width:100%; touch-action:none; }
+  #stage canvas { width:100%; display:block; border-radius:10px; }
+  .handle { position:absolute; width:34px; height:34px; margin:-17px 0 0 -17px; border-radius:50%;
+            border:3px solid #fff; background:#9E1B32cc; box-shadow:0 0 0 2px #0006; touch-action:none; }
+  #out { width:100%; border-radius:10px; display:block; }
+  label { display:block; font-size:13px; font-weight:700; margin:8px 0 3px; }
+  input, textarea { width:100%; font:16px system-ui; padding:10px; border:2px solid #ddd; border-radius:10px; background:#fff; }
+  textarea { min-height:110px; }
+  .hint { font-size:13px; color:#666; }
+  #log { font:12px ui-monospace, monospace; white-space:pre-wrap; color:#444; }
+  .hidden { display:none !important; }
+  a { color:var(--carmine); }
+</style>
+</head>
+<body>
+<header>
+  <img src="assets/icon-192.png" alt="">
+  <h1>LULUSIA STUDIO</h1>
+  <button class="ghost" id="btnSettings">⚙︎</button>
+</header>
+
+<section class="card" id="settings">
+  <b>Instagram connection</b>
+  <p class="hint">Stored only on this phone (never in the app's code). Import the <code>lulusia-studio-keys.json</code>
+     file made on the PC, or paste the values.</p>
+  <div class="row"><label class="btn ghost" style="flex:1;text-align:center">Import keys file<input type="file" id="keyFile" accept=".json,application/json" class="hidden"></label></div>
+  <label>Page token</label><input id="kToken" type="password" autocomplete="off">
+  <label>Page ID</label><input id="kPage" inputmode="numeric">
+  <label>Instagram user ID</label><input id="kIg" inputmode="numeric">
+  <div class="row" style="margin-top:10px"><button id="btnSaveKeys">Save</button><button class="ghost" id="btnTestKeys">Test</button><button class="ghost" id="btnForget">Forget</button></div>
+  <p id="keyStatus" class="hint"></p>
+</section>
+
+<section class="card">
+  <label class="btn red big" style="text-align:center">📷 Take / choose a photo
+    <input type="file" id="photo" accept="image/*" capture="environment" class="hidden"></label>
+  <p class="hint">Card flat on a plain surface that contrasts with its border, soft even light, no reflections, phone
+     straight above. You can fix the 4 corners after.</p>
+</section>
+
+<section class="card hidden" id="adjust">
+  <b>Card corners</b> <span class="hint">— drag the dots onto the card's corners</span>
+  <div id="stage"><canvas id="src"></canvas></div>
+  <div class="row" style="margin-top:10px">
+    <button id="btnRender" class="red">Make the post image</button>
+    <button class="ghost" id="btnRot">↻ 180°</button>
+  </div>
+</section>
+
+<section class="card hidden" id="result">
+  <img id="out" alt="post preview">
+  <div class="row" style="margin-top:10px"><button class="ghost" id="btnSave">Save image</button></div>
+  <label>Card name (English)</label><input id="fName" placeholder="Yamato">
+  <label>Card ID</label><input id="fId" placeholder="P-008" autocapitalize="characters">
+  <label>Rarity / type</label><input id="fKind" placeholder="P Promo · L Alt Art · SEC Manga …">
+  <label>Japanese name (hashtag, optional)</label><input id="fJp" placeholder="ヤマト">
+  <label>First line (optional)</label><input id="fIntro" placeholder="Full Set 🤗">
+  <label>Caption</label><textarea id="caption"></textarea>
+  <button class="red big" id="btnPost" style="margin-top:12px">Post to Instagram</button>
+  <div id="log"></div>
+</section>
+
+<script>
+"use strict";
+// ---------------- constants (same look as studio/studio.py) ----------------
+const OUT_W = 1440, OUT_H = 1728;                       // Instagram 4:5 max size
+const CARD_MM = [63, 88], CORNER_MM = 3, INSET_MM = .15;
+const LAYOUT = { heightFrac: .952, top: .032 };
+const SHADOW = { dx: -.0105, dy: .0075, blur: .0055, opacity: .36 };
+const BG = 250, GLYPH_INK = .055, SHARPEN = .6;
+const GRAPH = "https://graph.facebook.com/v24.0";
+const TAGS = "#onepiece #onepiececardgame #onepiecetcg #onepieceanime #onepiecemanga #tcgcollector #collector " +
+  "#cardcollector #tcg #bandai #animeart #anime #art #artwork #ワンピース #ワンピースカードゲーム #ワンピースアニメ " +
+  "#ワンピースマンガ {jp}#トレカ #トレーディングカードゲーム #コレクター #カード収集 #アニメ #マンガ #オタク #アニメ好き " +
+  "#マンガ好き #アニメコレクション #マンガコレクション";
+const MAX_SRC = 4000;                                   // iOS canvases die above ~16 MP: work at <= 4000 px
+
+const $ = id => document.getElementById(id);
+const log = m => { $("log").textContent += m + "\n"; };
+let srcCanvas = null, corners = null, finalBlob = null, glyphs = null, logoImg = null;
+
+// ---------------- settings (keys stay on the phone) ----------------
+const KEY = "lulusia-studio-keys";
+function keys() { try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch { return {}; } }
+function showKeys() { const k = keys(); $("kToken").value = k.token || ""; $("kPage").value = k.page || ""; $("kIg").value = k.ig || "";
+  $("keyStatus").textContent = k.token ? "Saved on this phone." : "Not set."; $("settings").classList.toggle("hidden", !!k.token); }
+$("btnSettings").onclick = () => $("settings").classList.toggle("hidden");
+$("btnSaveKeys").onclick = () => { localStorage.setItem(KEY, JSON.stringify({ token: $("kToken").value.trim(), page: $("kPage").value.trim(), ig: $("kIg").value.trim() })); showKeys(); };
+$("btnForget").onclick = () => { localStorage.removeItem(KEY); showKeys(); $("settings").classList.remove("hidden"); };
+$("keyFile").onchange = async e => { const j = JSON.parse(await e.target.files[0].text());
+  $("kToken").value = j.META_PAGE_TOKEN || j.token || ""; $("kPage").value = j.META_PAGE_ID || j.page || ""; $("kIg").value = j.IG_USER_ID || j.ig || ""; $("btnSaveKeys").click(); };
+$("btnTestKeys").onclick = async () => { const k = keys(); $("keyStatus").textContent = "Testing…";
+  try { const r = await api("GET", `${k.ig}?fields=username,followers_count`); $("keyStatus").textContent = `OK: @${r.username} (${r.followers_count} followers)`; }
+  catch (e) { $("keyStatus").textContent = "Error: " + e.message; } };
+
+// ---------------- photo in ----------------
+$("photo").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = await loadImage(URL.createObjectURL(f));
+  useImage(img);
+};
+function loadImage(url) { return new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = ko; i.src = url; }); }
+function useImage(img) {
+  const s = Math.min(1, MAX_SRC / Math.max(img.naturalWidth, img.naturalHeight));
+  srcCanvas = document.createElement("canvas");
+  srcCanvas.width = Math.round(img.naturalWidth * s); srcCanvas.height = Math.round(img.naturalHeight * s);
+  const c = srcCanvas.getContext("2d"); c.imageSmoothingQuality = "high"; c.drawImage(img, 0, 0, srcCanvas.width, srcCanvas.height);
+  corners = detectCard(srcCanvas) || defaultCorners(srcCanvas);
+  showAdjust();
+}
+function defaultCorners(cv) { const w = cv.width, h = cv.height; return [[w*.2,h*.15],[w*.8,h*.15],[w*.8,h*.85],[w*.2,h*.85]]; }
+
+// ---------------- card detection: background colour distance -> largest blob -> 4 corners -> edge refine ----------------
+function detectCard(cv) {
+  const sc = Math.min(1, 700 / Math.max(cv.width, cv.height));
+  const w = Math.round(cv.width * sc), h = Math.round(cv.height * sc);
+  const t = document.createElement("canvas"); t.width = w; t.height = h;
+  const tc = t.getContext("2d"); tc.drawImage(cv, 0, 0, w, h);
+  const d = tc.getImageData(0, 0, w, h).data;
+  const lab = new Float32Array(w * h * 3);
+  for (let i = 0; i < w * h; i++) { const L = rgb2lab(d[4*i], d[4*i+1], d[4*i+2]); lab[3*i] = L[0]; lab[3*i+1] = L[1]; lab[3*i+2] = L[2]; }
+  // background = median colour of the image border
+  const bl = [], ba = [], bb = []; const B = Math.max(4, Math.round(Math.min(w, h) * .03));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (x < B || y < B || x >= w - B || y >= h - B) { const i = y*w + x; bl.push(lab[3*i]); ba.push(lab[3*i+1]); bb.push(lab[3*i+2]); }
+  const med = a => { a.sort((p, q) => p - q); return a[a.length >> 1]; };
+  const bg = [med(bl), med(ba), med(bb)];
+  const dist = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) dist[i] = Math.hypot(lab[3*i]-bg[0], lab[3*i+1]-bg[1], lab[3*i+2]-bg[2]);
+  const thr = otsu(dist);
+  let mask = new Uint8Array(w * h); for (let i = 0; i < w * h; i++) mask[i] = dist[i] > thr ? 1 : 0;
+  mask = close(mask, w, h, 4);
+  const blob = largestBlob(mask, w, h); if (!blob || blob.count < w * h * .04) return null;
+  // 4 extreme points of the blob (card is a convex quad): extremes of x+y, x-y
+  let p = [null, null, null, null], v = [-1e9, -1e9, -1e9, -1e9];
+  for (const i of blob.pixels) { const x = i % w, y = (i / w) | 0;
+    const s = [-(x + y), x - y, x + y, y - x];
+    for (let k = 0; k < 4; k++) if (s[k] > v[k]) { v[k] = s[k]; p[k] = [x, y]; } }
+  let c = p.map(q => [q[0] / sc, q[1] / sc]);                          // TL, TR, BR, BL
+  try { c = refineCorners(cv, c); } catch (e) { console.warn(e); }
+  return c;
+}
+function rgb2lab(r, g, b) { // sRGB -> CIE Lab (D65)
+  const f = u => { u /= 255; return u > .04045 ? Math.pow((u + .055) / 1.055, 2.4) : u / 12.92; };
+  r = f(r); g = f(g); b = f(b);
+  let X = (r*.4124 + g*.3576 + b*.1805) / .95047, Y = r*.2126 + g*.7152 + b*.0722, Z = (r*.0193 + g*.1192 + b*.9505) / 1.08883;
+  const h = t => t > .008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+  X = h(X); Y = h(Y); Z = h(Z); return [116 * Y - 16, 500 * (X - Y), 200 * (Y - Z)];
+}
+function otsu(a) { let mx = 0; for (const v of a) if (v > mx) mx = v; const hist = new Float64Array(256);
+  for (const v of a) hist[Math.min(255, (v / mx * 255) | 0)]++;
+  let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sB = 0, wB = 0, best = 0, th = 0; const n = a.length;
+  for (let i = 0; i < 256; i++) { wB += hist[i]; if (!wB) continue; const wF = n - wB; if (!wF) break; sB += i * hist[i];
+    const mB = sB / wB, mF = (sum - sB) / wF, b = wB * wF * (mB - mF) ** 2; if (b > best) { best = b; th = i; } }
+  return th / 255 * mx; }
+function close(m, w, h, r) { return erode(dilate(m, w, h, r), w, h, r); }
+function dilate(m, w, h, r) { return morph(m, w, h, r, 1); }
+function erode(m, w, h, r) { return morph(m, w, h, r, 0); }
+function morph(m, w, h, r, isDil) { // separable square
+  const t = new Uint8Array(w * h), o = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = isDil ? 0 : 1;
+    for (let k = -r; k <= r; k++) { const xx = Math.min(w - 1, Math.max(0, x + k)); const q = m[y*w + xx]; if (isDil ? q : !q) { v = isDil ? 1 : 0; break; } } t[y*w + x] = v; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = isDil ? 0 : 1;
+    for (let k = -r; k <= r; k++) { const yy = Math.min(h - 1, Math.max(0, y + k)); const q = t[yy*w + x]; if (isDil ? q : !q) { v = isDil ? 1 : 0; break; } } o[y*w + x] = v; }
+  return o; }
+function largestBlob(m, w, h) { const lab = new Int32Array(w * h); let best = null, id = 0;
+  for (let s = 0; s < w * h; s++) { if (!m[s] || lab[s]) continue; id++; const stack = [s], px = []; lab[s] = id;
+    while (stack.length) { const i = stack.pop(); px.push(i); const x = i % w, y = (i / w) | 0;
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const j = yy*w + xx; if (m[j] && !lab[j]) { lab[j] = id; stack.push(j); } } }
+    if (!best || px.length > best.count) best = { count: px.length, pixels: px }; }
+  return best; }
+
+// sub-pixel edges: along each side, many scanlines across the edge, strongest colour step, robust line fit
+function refineCorners(cv, c) {
+  const W = cv.width, H = cv.height, ctx = cv.getContext("2d");
+  const data = ctx.getImageData(0, 0, W, H).data;
+  const lum = (x, y) => { x = Math.max(0, Math.min(W - 1, Math.round(x))); y = Math.max(0, Math.min(H - 1, Math.round(y))); const i = 4 * (y * W + x); return .299*data[i] + .587*data[i+1] + .114*data[i+2]; };
+  const lines = [];
+  const centre = [(c[0][0]+c[1][0]+c[2][0]+c[3][0]) / 4, (c[0][1]+c[1][1]+c[2][1]+c[3][1]) / 4];
+  for (let s = 0; s < 4; s++) {
+    const a = c[s], b = c[(s + 1) % 4]; const L = Math.hypot(b[0]-a[0], b[1]-a[1]);
+    const ux = (b[0]-a[0]) / L, uy = (b[1]-a[1]) / L; let nx = -uy, ny = ux;
+    const mid = [(a[0]+b[0]) / 2, (a[1]+b[1]) / 2]; if ((centre[0]-mid[0])*nx + (centre[1]-mid[1])*ny > 0) { nx = -nx; ny = -ny; } // normal points outward
+    const band = Math.max(8, L * .04), pts = [];
+    for (let t = .12; t <= .88; t += .01) {                               // skip the rounded corners
+      const px = a[0] + (b[0]-a[0]) * t, py = a[1] + (b[1]-a[1]) * t; let bestG = 0, bestO = 0, prev = lum(px - nx*band, py - ny*band);
+      for (let o = -band + 1; o <= band; o++) { const v = lum(px + nx*o, py + ny*o), g = Math.abs(v - prev); if (g > bestG) { bestG = g; bestO = o - .5; } prev = v; }
+      if (bestG > 6) pts.push([px + nx*bestO, py + ny*bestO]);
+    }
+    if (pts.length < 15) return c;
+    lines.push(fitLine(pts));
+  }
+  const out = [];
+  for (let k = 0; k < 4; k++) { const l1 = lines[(k + 3) % 4], l2 = lines[k]; out.push(intersect(l1, l2)); }
+  return out;                                                           // TL = left side x top side, ...
+}
+function fitLine(pts) { // total least squares + one trimming pass
+  let use = pts;
+  for (let it = 0; it < 2; it++) {
+    let mx = 0, my = 0; for (const p of use) { mx += p[0]; my += p[1]; } mx /= use.length; my /= use.length;
+    let sxx = 0, sxy = 0, syy = 0; for (const p of use) { const dx = p[0]-mx, dy = p[1]-my; sxx += dx*dx; sxy += dx*dy; syy += dy*dy; }
+    const th = .5 * Math.atan2(2 * sxy, sxx - syy), d = [Math.cos(th), Math.sin(th)];
+    if (it === 0) { const r = use.map(p => Math.abs((p[0]-mx)*-d[1] + (p[1]-my)*d[0])); const lim = [...r].sort((a, b) => a - b)[(r.length * .8) | 0];
+      use = use.filter((p, i) => r[i] <= lim + 1e-6); continue; }
+    return { p: [mx, my], d };
+  }
+}
+function intersect(l1, l2) { const [x1, y1] = l1.p, [dx1, dy1] = l1.d, [x2, y2] = l2.p, [dx2, dy2] = l2.d;
+  const den = dx1 * dy2 - dy1 * dx2; const t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / den; return [x1 + t * dx1, y1 + t * dy1]; }
+
+// ---------------- corner adjustment UI ----------------
+function showAdjust() {
+  $("adjust").classList.remove("hidden"); $("result").classList.add("hidden");
+  const cv = $("src"); const s = Math.min(1, 1400 / Math.max(srcCanvas.width, srcCanvas.height));
+  cv.width = Math.round(srcCanvas.width * s); cv.height = Math.round(srcCanvas.height * s); cv.dataset.s = s;
+  cv.getContext("2d").drawImage(srcCanvas, 0, 0, cv.width, cv.height);
+  document.querySelectorAll(".handle").forEach(h => h.remove());
+  corners.forEach((p, k) => { const h = document.createElement("div"); h.className = "handle"; h.dataset.k = k; $("stage").appendChild(h); drag(h); });
+  placeHandles(); drawQuad();
+  $("adjust").scrollIntoView({ behavior: "smooth" });
+}
+function scaleView() { const cv = $("src"); return cv.getBoundingClientRect().width / srcCanvas.width; }
+function placeHandles() { const k = scaleView(); document.querySelectorAll(".handle").forEach(h => { const p = corners[+h.dataset.k]; h.style.left = p[0]*k + "px"; h.style.top = p[1]*k + "px"; }); }
+function drawQuad() { const cv = $("src"), c = cv.getContext("2d"), s = +cv.dataset.s;
+  c.drawImage(srcCanvas, 0, 0, cv.width, cv.height); c.lineWidth = 3; c.strokeStyle = "#9E1B32"; c.beginPath();
+  corners.forEach((p, i) => i ? c.lineTo(p[0]*s, p[1]*s) : c.moveTo(p[0]*s, p[1]*s)); c.closePath(); c.stroke(); }
+function drag(h) { h.addEventListener("pointerdown", e => { h.setPointerCapture(e.pointerId);
+  const move = ev => { const r = $("src").getBoundingClientRect(), k = scaleView();
+    corners[+h.dataset.k] = [Math.max(0, Math.min(srcCanvas.width, (ev.clientX - r.left) / k)), Math.max(0, Math.min(srcCanvas.height, (ev.clientY - r.top) / k))];
+    placeHandles(); drawQuad(); };
+  const up = () => { h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); };
+  h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); }); }
+window.addEventListener("resize", () => srcCanvas && placeHandles());
+let flip180 = false;
+$("btnRot").onclick = () => { flip180 = !flip180; if (!$("result").classList.contains("hidden")) $("btnRender").click(); };
+
+// ---------------- render the post image ----------------
+$("btnRender").onclick = async () => {
+  $("btnRender").disabled = true; $("btnRender").textContent = "Working…";
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    const card = warpCard(srcCanvas, orderPortrait(corners));
+    const blob = await compose(card);
+    finalBlob = blob; $("out").src = URL.createObjectURL(blob);
+    $("result").classList.remove("hidden"); updateCaption(); $("result").scrollIntoView({ behavior: "smooth" });
+  } catch (e) { alert("Render failed: " + e.message); console.error(e); }
+  $("btnRender").disabled = false; $("btnRender").textContent = "Make the post image";
+};
+function orderPortrait(c) { // corners TL,TR,BR,BL so that TL->BL is the long side (card upright)
+  const d = (a, b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
+  let q = c.slice(); if (d(q[0], q[1]) > d(q[1], q[2])) q = [q[3], q[0], q[1], q[2]];   // landscape -> rotate
+  if (flip180) q = [q[2], q[3], q[0], q[1]];
+  return q; }
+function warpCard(cv, q) { // perspective warp to an upright card image (~ 1000 x 1400 px is enough for 1440x1728 output)
+  const outH = 1760, outW = Math.round(outH * CARD_MM[0] / CARD_MM[1]);
+  const Hm = homography([[0,0],[outW,0],[outW,outH],[0,outH]], q);
+  const sw = cv.width, sh = cv.height, sd = cv.getContext("2d").getImageData(0, 0, sw, sh).data;
+  const out = new ImageData(outW, outH), od = out.data;
+  // supersample 2x2 per output pixel (the photo has more pixels than the output): anti-alias + mild descreen
+  const off = [[.25,.25],[.75,.25],[.25,.75],[.75,.75]];
+  for (let y = 0; y < outH; y++) for (let x = 0; x < outW; x++) {
+    let r = 0, g = 0, b = 0;
+    for (const [ox, oy] of off) { const X = x + ox, Y = y + oy, w = Hm[6]*X + Hm[7]*Y + 1;
+      const u = (Hm[0]*X + Hm[1]*Y + Hm[2]) / w, v = (Hm[3]*X + Hm[4]*Y + Hm[5]) / w;
+      const s = bilinear(sd, sw, sh, u, v); r += s[0]; g += s[1]; b += s[2]; }
+    const i = 4 * (y * outW + x); od[i] = r / 4; od[i+1] = g / 4; od[i+2] = b / 4; od[i+3] = 255; }
+  const c = document.createElement("canvas"); c.width = outW; c.height = outH; c.getContext("2d").putImageData(out, 0, 0);
+  return c; }
+function bilinear(d, w, h, x, y) { x = Math.max(0, Math.min(w - 1.001, x - .5)); y = Math.max(0, Math.min(h - 1.001, y - .5));
+  const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, i = 4 * (y0 * w + x0), j = i + 4 * w;
+  const m = k => (d[i+k]*(1-fx) + d[i+4+k]*fx) * (1-fy) + (d[j+k]*(1-fx) + d[j+4+k]*fx) * fy;
+  return [m(0), m(1), m(2)]; }
+function homography(src, dst) { // maps src points -> dst points (8 unknowns)
+  const A = [], bv = [];
+  for (let i = 0; i < 4; i++) { const [x, y] = src[i], [u, v] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -u*x, -u*y]); bv.push(u); A.push([0, 0, 0, x, y, 1, -v*x, -v*y]); bv.push(v); }
+  return solve(A, bv); }
+function solve(A, b) { const n = b.length; for (let i = 0; i < n; i++) A[i].push(b[i]);
+  for (let c = 0; c < n; c++) { let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]]; for (let r = 0; r < n; r++) { if (r === c) continue; const f = A[r][c] / A[c][c]; for (let k = c; k <= n; k++) A[r][k] -= f * A[c][k]; } }
+  return A.map((row, i) => row[n] / row[i]); }
+
+async function compose(card) {
+  await assets();
+  // colour: per-channel 0.5 / 99.7 % levels + a little saturation (like studio.grade)
+  const cw0 = card.width, ch0 = card.height, cx = card.getContext("2d"), id = cx.getImageData(0, 0, cw0, ch0), d = id.data;
+  const lo = [], hi = [];
+  for (let k = 0; k < 3; k++) { const hist = new Uint32Array(256); let n = 0;
+    for (let y = ch0*.06|0; y < ch0*.94; y += 2) for (let x = cw0*.06|0; x < cw0*.94; x += 2) { hist[d[4*(y*cw0+x)+k]]++; n++; }
+    let acc = 0, a = 0, b = 255; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc < n * .005) a = v; if (acc < n * .997) b = v; }
+    lo.push(a); hi.push(Math.max(a + 10, b)); }
+  for (let i = 0; i < d.length; i += 4) {
+    let r = (d[i]-lo[0]) / (hi[0]-lo[0]), g = (d[i+1]-lo[1]) / (hi[1]-lo[1]), b = (d[i+2]-lo[2]) / (hi[2]-lo[2]);
+    r = Math.min(1, Math.max(0, r)); g = Math.min(1, Math.max(0, g)); b = Math.min(1, Math.max(0, b));
+    const m = (r + g + b) / 3; r = m + (r - m) * 1.12; g = m + (g - m) * 1.12; b = m + (b - m) * 1.12;
+    d[i] = 255 * Math.min(1, Math.max(0, r)) ** .95; d[i+1] = 255 * Math.min(1, Math.max(0, g)) ** .95; d[i+2] = 255 * Math.min(1, Math.max(0, b)) ** .95; }
+  cx.putImageData(id, 0, 0);
+
+  const W = OUT_W, H = OUT_H, ch = Math.round(H * LAYOUT.heightFrac), cw = Math.round(ch * CARD_MM[0] / CARD_MM[1]);
+  const x0 = Math.round((W - cw) / 2), y0 = Math.round(H * LAYOUT.top);
+  const canvas = document.createElement("canvas"); canvas.width = W; canvas.height = H; const c = canvas.getContext("2d");
+  c.fillStyle = `rgb(${BG},${BG},${BG})`; c.fillRect(0, 0, W, H);
+  drawGlyphs(c, W, H);
+  // card, resized with good smoothing, sharpened, clipped to its rounded rectangle (inset)
+  const small = document.createElement("canvas"); small.width = cw; small.height = ch;
+  const sc = small.getContext("2d"); sc.imageSmoothingQuality = "high"; sc.drawImage(card, 0, 0, cw, ch); unsharp(sc, cw, ch, SHARPEN);
+  const pxmm = ch / CARD_MM[1], inset = INSET_MM * pxmm, rad = (CORNER_MM - INSET_MM) * pxmm;
+  // drop shadow = the card silhouette, shifted down-left and blurred (canvas shadow, works on iOS Safari)
+  c.save(); c.shadowColor = `rgba(0,0,0,${SHADOW.opacity})`; c.shadowBlur = SHADOW.blur * H * 2;
+  c.shadowOffsetX = SHADOW.dx * H; c.shadowOffsetY = SHADOW.dy * H; c.fillStyle = "#888";
+  roundRect(c, x0 + inset, y0 + inset, cw - 2*inset, ch - 2*inset, rad); c.fill(); c.restore();
+  c.save(); roundRect(c, x0 + inset, y0 + inset, cw - 2*inset, ch - 2*inset, rad); c.clip(); c.drawImage(small, x0, y0); c.restore();
+  watermark(c, W, H, cw);
+  return await new Promise(r => canvas.toBlob(r, "image/jpeg", .93)); }
+function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+function unsharp(ctx, w, h, amount) { // 3x3-ish gaussian approx via box blur twice
+  const id = ctx.getImageData(0, 0, w, h), d = id.data, b = boxBlur(boxBlur(d, w, h, 1), w, h, 1);
+  for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++) d[i+k] = Math.max(0, Math.min(255, d[i+k] + amount * (d[i+k] - b[i+k])));
+  ctx.putImageData(id, 0, 0); }
+function boxBlur(d, w, h, r) { const o = new Float32Array(d.length), t = new Float32Array(d.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let k = 0; k < 3; k++) { let s = 0, n = 0;
+    for (let q = -r; q <= r; q++) { const xx = Math.min(w-1, Math.max(0, x+q)); s += d[4*(y*w+xx)+k]; n++; } t[4*(y*w+x)+k] = s / n; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let k = 0; k < 3; k++) { let s = 0, n = 0;
+    for (let q = -r; q <= r; q++) { const yy = Math.min(h-1, Math.max(0, y+q)); s += t[4*(yy*w+x)+k]; n++; } o[4*(y*w+x)+k] = s / n; }
+  return o; }
+
+// faint poneglyph rows (the 62 vector symbols, same as the reels / studio photos)
+function drawGlyphs(c, W, H) {
+  if (!glyphs) return; let seed = 7; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const size = W / 7, pitch = size * 1.32, gap = size * .24, ink = Math.round(BG * (1 - GLYPH_INK));
+  c.save(); c.strokeStyle = c.fillStyle = `rgb(${ink},${ink},${ink})`; c.lineCap = c.lineJoin = "round";
+  for (let i = 0, y = -size / 3; y < H; i++, y += pitch) {
+    let x = -rnd() * (size + gap) - (i % 2 ? size / 2 : 0);
+    while (x < W) { const g = glyphs[(rnd() * glyphs.length) | 0], gw = g.aspect * size;
+      drawGlyph(c, g, x + (size - gw) / 2, y + size * .15, size); x += size + gap; } }
+  c.restore(); }
+function drawGlyph(c, g, x, y, s) {
+  c.lineWidth = g.width * s;
+  for (const [kind, pts] of g.items) { c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(x + p[0]*s, y + p[1]*s) : c.moveTo(x + p[0]*s, y + p[1]*s)); c.stroke(); }
+  for (const [cx, cy, r] of g.rings) { c.beginPath(); c.arc(x + cx*s, y + cy*s, Math.max(1, r*s - c.lineWidth / 2), 0, 2*Math.PI); c.stroke(); }
+  for (const [cx, cy, r] of g.dots) { c.beginPath(); c.arc(x + cx*s, y + cy*s, Math.max(r*s, c.lineWidth * .55), 0, 2*Math.PI); c.fill(); } }
+function watermark(c, W, H, cw) {
+  if (!logoImg) return; const margin = (W - cw) / 2, lh = H * .062, lw = lh * logoImg.width / logoImg.height;
+  const cx = W - margin / 2, y1 = H * LAYOUT.top + H * LAYOUT.heightFrac - H * .022;
+  c.globalAlpha = .92; c.drawImage(logoImg, cx - lw / 2, y1 - lh, lw, lh); c.globalAlpha = 1;
+  let size = Math.round(H * .0105); c.font = `${size}px InterBlack`;
+  while (c.measureText("@lulusiaexisted").width > margin - 12 && size > 8) { size--; c.font = `${size}px InterBlack`; }
+  c.fillStyle = "rgba(38,37,43,.55)"; c.textAlign = "center"; c.textBaseline = "top"; c.fillText("@lulusiaexisted", cx, y1 + H * .004); }
+async function assets() {
+  if (!glyphs) glyphs = await (await fetch("assets/glyphs.json")).json();
+  if (!logoImg) { const i = await loadImage("assets/logo.png"); // crop transparent margins
+    const t = document.createElement("canvas"); t.width = i.width; t.height = i.height; const tc = t.getContext("2d"); tc.drawImage(i, 0, 0);
+    const d = tc.getImageData(0, 0, i.width, i.height).data; let x0 = i.width, y0 = i.height, x1 = 0, y1 = 0;
+    for (let y = 0; y < i.height; y++) for (let x = 0; x < i.width; x++) if (d[4*(y*i.width+x)+3] > 8) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    const o = document.createElement("canvas"); o.width = x1 - x0 + 1; o.height = y1 - y0 + 1; o.getContext("2d").drawImage(t, -x0, -y0); logoImg = o; }
+  try { await document.fonts.load("20px InterBlack"); } catch {} }
+
+// ---------------- caption ----------------
+function updateCaption() { const n = $("fName").value.trim(), id = $("fId").value.trim().toUpperCase(), k = $("fKind").value.trim(),
+  jp = $("fJp").value.trim().replace(/^#/, ""), intro = $("fIntro").value.trim();
+  $("caption").value = (intro ? intro + "\n" : "") + `${n} [${id}] ${k}`.trim() + "\n\n" + TAGS.replace("{jp}", jp ? `#${jp} ` : ""); }
+["fName", "fId", "fKind", "fJp", "fIntro"].forEach(i => $(i).addEventListener("input", updateCaption));
+$("btnSave").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(finalBlob);
+  a.download = (($("fName").value || "card") + "_" + ($("fId").value || "")).replace(/\W+/g, "_") + ".jpg"; a.click(); };
+
+// ---------------- post to Instagram (official Graph API) ----------------
+async function api(method, path, params = {}, body = null) {
+  const k = keys(); const url = new URL(`${GRAPH}/${path}`); if (!body) { for (const [a, b] of Object.entries(params)) url.searchParams.set(a, b); }
+  url.searchParams.set("access_token", k.token);
+  const r = await fetch(url, { method, body }); const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error ? j.error.message : `HTTP ${r.status}`); return j; }
+$("btnPost").onclick = async () => {
+  const k = keys(); if (!k.token || !k.page || !k.ig) { alert("Set the Instagram connection first (⚙︎)."); return; }
+  if (!finalBlob) return; if (!$("fName").value.trim() || !$("fId").value.trim()) { if (!confirm("Name or ID is empty. Post anyway?")) return; }
+  const btn = $("btnPost"); btn.disabled = true; $("log").textContent = ""; let pagePhoto = null;
+  try {
+    log("1/4 uploading the image (hidden Page photo)…");
+    const fd = new FormData(); fd.append("published", "false"); fd.append("source", finalBlob, "post.jpg");
+    pagePhoto = (await api("POST", `${k.page}/photos`, {}, fd)).id;
+    const imgs = (await api("GET", pagePhoto, { fields: "images" })).images; const url = imgs.sort((a, b) => b.width - a.width)[0].source;
+    log("2/4 creating the Instagram post…");
+    const cont = (await api("POST", `${k.ig}/media`, { image_url: url, caption: $("caption").value })).id;
+    for (let i = 0; i < 20; i++) { const s = (await api("GET", cont, { fields: "status_code" })).status_code; if (!s || s === "FINISHED") break; if (s === "ERROR") throw new Error("Instagram could not process the image"); await new Promise(r => setTimeout(r, 2500)); }
+    log("3/4 publishing…");
+    const media = (await api("POST", `${k.ig}/media_publish`, { creation_id: cont })).id;
+    const link = (await api("GET", media, { fields: "permalink" })).permalink;
+    log("4/4 done ✅"); $("log").innerHTML += `<a href="${link}" target="_blank">${link}</a>\n`;
+  } catch (e) { log("❌ " + e.message); }
+  finally { if (pagePhoto) api("DELETE", pagePhoto).catch(() => {}); btn.disabled = false; } };
+
+// ---------------- start ----------------
+showKeys();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+const demo = new URLSearchParams(location.search).get("demo");      // test hook: ?demo=<image url> -> auto render
+if (demo) loadImage(demo).then(img => { useImage(img); window.__corners = corners.map(p => p.map(Math.round)); return $("btnRender").onclick(); })
+  .then(() => { document.body.innerHTML = `<pre id="c">${JSON.stringify(window.__corners)}</pre><img src="${$("out") ? $("out").src : ""}" style="width:720px">`;
+                const o = document.querySelector("img"); o.src = URL.createObjectURL(finalBlob); document.title = "DEMO DONE"; });
+</script>
+</body>
+</html>
